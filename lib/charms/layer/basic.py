@@ -29,6 +29,13 @@ def bootstrap_charm_deps():
     # and the charm itself can actually succeed. This call does nothing
     # unless the operator has created and populated $JUJU_CHARM_DIR/exec.d.
     execd_preinstall()
+    # If this is a Yum based distribution, use yum
+    if os.path.isfile('/usr/bin/yum'):
+        pkg_install = yum_install
+        distro = 'centos'
+    else:
+        pkg_install = apt_install
+        distro = 'ubuntu'
     # ensure that $JUJU_CHARM_DIR/bin is on the path, for helper scripts
     charm_dir = os.environ['JUJU_CHARM_DIR']
     os.environ['PATH'] += ':%s' % os.path.join(charm_dir, 'bin')
@@ -68,26 +75,38 @@ def bootstrap_charm_deps():
                 "allow_hosts = ''\n",
                 "find_links = file://{}/wheelhouse/\n".format(charm_dir),
             ])
-        apt_install([
-            'python3-pip',
-            'python3-setuptools',
-            'python3-yaml',
-            'python3-dev',
-            'python3-wheel',
-            'build-essential',
-        ])
+        if distro == 'centos':
+            # First install EPEL, to make Python36 available
+            pkg_install(['epel-release'])
+            # Install Python
+            pkg_install([
+                'python36',
+                'python36-pip',
+                'python36-setuptools',
+                'python36-PyYAML',
+                'python36-virtualenv',
+            ])
+        else:
+            pkg_install([
+                'python3-pip',
+                'python3-setuptools',
+                'python3-yaml',
+                'python3-dev',
+                'python3-wheel',
+                'build-essential',
+            ])
         from charms.layer import options
         cfg = options.get('basic')
         # include packages defined in layer.yaml
-        apt_install(cfg.get('packages', []))
+        pkg_install(cfg.get('packages', []))
         # if we're using a venv, set it up
         if cfg.get('use_venv'):
             if not os.path.exists(venv):
                 series = lsb_release()['DISTRIB_CODENAME']
-                if series in ('precise', 'trusty'):
-                    apt_install(['python-virtualenv'])
+                if series in ('precise', 'trusty', 'Core'):
+                    pkg_install(['python-virtualenv'])
                 else:
-                    apt_install(['virtualenv'])
+                    pkg_install(['virtualenv'])
                 cmd = ['virtualenv', '-ppython3', '--never-download', venv]
                 if cfg.get('include_system_packages'):
                     cmd.append('--system-site-packages')
@@ -218,6 +237,39 @@ def apt_install(packages):
                 check_call(['apt-get', 'update'])
             except CalledProcessError:
                 # sometimes it's a dpkg lock issue
+                pass
+            sleep(5)
+        else:
+            break
+
+
+def yum_install(packages):
+    """
+    Install yum packages.
+    """
+    if isinstance(packages, (str, bytes)):
+        packages = [packages]
+
+    # If an empty list is provided, return
+    if not packages:
+        return
+
+    env = os.environ.copy()
+
+    cmd = ['yum',
+           '--assumeyes',
+           'install']
+    for attempt in range(3):
+        try:
+            check_call(cmd + packages, env=env)
+        except CalledProcessError:
+            if attempt == 2:  # third attempt
+                raise
+            try:
+                # metadata may be old, clean before next attempt
+                check_call(['yum', 'clean', 'metadata'])
+            except CalledProcessError:
+                # sometimes it's a lockfile issue
                 pass
             sleep(5)
         else:
